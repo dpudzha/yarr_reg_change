@@ -7,7 +7,7 @@ When using multi-module files, the specified chip position is configured
 across ALL modules, then a single scan is run.
 
 Usage:
-    python change_registers.py <input_json> <chip_numbers> [--vmux <values>] [--imux <values>] [output_file]
+    python change_registers.py <input_json> <chip_numbers> [--vmux <values>] [--imux <values>] [--scan-type TYPE] [output_file]
 
 Examples:
     # Single module - both vmux and imux
@@ -21,6 +21,12 @@ Examples:
 
     # Multi-module: configure chip 4 in all modules, run one scan
     python3 change_registers.py /configs/modules/SP_4_modules.json 4 --vmux 0,5,12 --imux 0,5,12
+
+    # With dedicated scan type (runs std_digitalscan.json instead of simple config)
+    python3 change_registers.py /configs/modules/20UPGM23211190/20UPGM23211190_L2_warm.json 1,2 --vmux 0,5 --scan-type digital
+
+    # Available scan types: digital, analog, noise, random, selftrigger
+    python3 change_registers.py module.json 1 --imux 10 --scan-type selftrigger
 """
 
 import argparse
@@ -38,6 +44,16 @@ ID_TO_CHIP_NUMBER = {v: k for k, v in CHIP_NUMBER_TO_ID.items()}
 
 SCAN_CONSOLE = "/YARR/bin/scanConsole"
 CONTROLLER_CONFIG = "/configs/yarr/controller/controller_demi.json"
+SCAN_CONFIGS_DIR = "/configs/yarr/scans/itkpixv2"
+
+# Mapping from scan type to JSON filename
+SCAN_TYPE_TO_FILE = {
+    "digital": "std_digitalscan.json",
+    "analog": "std_analogscan.json",
+    "noise": "std_noisescan.json",
+    "random": "randomtrigger_sourcescan.json",
+    "selftrigger": "selftrigger_source.json",
+}
 
 
 def parse_csv_ints(value):
@@ -101,9 +117,15 @@ def set_monitor(chip_json_path, monitor_v, monitor_i):
         f.write(text)
 
 
-def run_scan(input_json, max_retries=3):
+def run_scan(input_json, max_retries=3, scan_type=None):
     """Run the scanConsole executable with retry logic."""
     cmd = [SCAN_CONSOLE, "-r", CONTROLLER_CONFIG, "-c", input_json, "-o", "/dev/null"]
+
+    # Add scan config if scan_type is specified
+    if scan_type:
+        scan_config = os.path.join(SCAN_CONFIGS_DIR, SCAN_TYPE_TO_FILE[scan_type])
+        cmd.extend(["-s", scan_config])
+        print(f"  Running dedicated {scan_type} scan (config: {SCAN_TYPE_TO_FILE[scan_type]})")
 
     for attempt in range(1, max_retries + 1):
         print(f"  Running (attempt {attempt}/{max_retries}): {' '.join(cmd)}")
@@ -120,7 +142,10 @@ def run_scan(input_json, max_retries=3):
                 sys.exit(1)
         else:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"  Configuration completed successfully at {timestamp}.")
+            if scan_type:
+                print(f"  {scan_type.capitalize()} scan completed successfully at {timestamp}.")
+            else:
+                print(f"  Configuration completed successfully at {timestamp}.")
             return timestamp
     return None
 
@@ -141,6 +166,11 @@ Examples:
 
   Multi-module (chip position 4 across all modules):
     python3 change_registers.py /configs/modules/SP_4_modules.json 4 --vmux 0,5,12 --imux 0,5,12
+
+  With dedicated scan type (digital scan instead of simple config):
+    python3 change_registers.py module.json 1,2 --vmux 0,5 --scan-type digital
+
+  Available scan types: digital, analog, noise, random, selftrigger
         """
     )
     parser.add_argument("input_json", help="Path to connectivity JSON (single or multi-module)")
@@ -163,6 +193,13 @@ Examples:
         nargs="?",
         default=None,
         help="Output filename (default: registers_info_{datetime}.txt)",
+    )
+    parser.add_argument(
+        "--scan-type",
+        choices=["digital", "analog", "noise", "random", "selftrigger"],
+        default=None,
+        help="Optional scan type to run instead of simple configuration. "
+             "Uses scan configs from /configs/yarr/scans/itkpixv2/",
     )
     args = parser.parse_args()
 
@@ -218,6 +255,10 @@ Examples:
     for c in target_chips:
         print(f"  [{c['module']}] {c['chip_name']} (position {c['chip_number']})")
 
+    if args.scan_type:
+        print(f"\nScan type: {args.scan_type} (using {SCAN_TYPE_TO_FILE[args.scan_type]})")
+        print("Running dedicated scan instead of simple configuration.")
+
     rows = []
 
     # in the same module simultaneously
@@ -245,7 +286,7 @@ Examples:
                     set_monitor(c['path'], 63, 63)
 
                 # Run single scan
-                timestamp = run_scan(args.input_json)
+                timestamp = run_scan(args.input_json, scan_type=args.scan_type)
 
                 # Wait
                 print("  Waiting 10 seconds...")
@@ -270,7 +311,7 @@ Examples:
                     set_monitor(c['path'], 63, 63)
 
                 # Run single scan
-                timestamp = run_scan(args.input_json)
+                timestamp = run_scan(args.input_json, scan_type=args.scan_type)
 
                 # Wait
                 print("  Waiting 10 seconds...")
