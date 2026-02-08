@@ -27,6 +27,9 @@ Examples:
 
     # Available scan types: digital, analog, noise, random, selftrigger
     python3 change_registers.py module.json 1 --imux 10 --scan-type selftrigger
+
+    # With Grafana readback (queries M1-M4 REG[V] panels after each scan)
+    python3 change_registers.py SP_4_modules.json 4 --vmux 0,5,12 --grafana module_map.txt
 """
 
 import argparse
@@ -37,6 +40,8 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+
+from grafana_query import fetch_register_values, load_module_map
 
 
 CHIP_NUMBER_TO_ID = {1: 12, 2: 13, 3: 14, 4: 15}
@@ -117,18 +122,12 @@ def set_monitor(chip_json_path, monitor_v, monitor_i):
         f.write(text)
 
 
-def run_scan(input_json, max_retries=3, scan_type=None):
-    """Run the scanConsole executable with retry logic."""
+def run_config(input_json, max_retries=3):
+    """Run scanConsole for configuration only (blocking)."""
     cmd = [SCAN_CONSOLE, "-r", CONTROLLER_CONFIG, "-c", input_json, "-o", "/dev/null"]
 
-    # Add scan config if scan_type is specified
-    if scan_type:
-        scan_config = os.path.join(SCAN_CONFIGS_DIR, SCAN_TYPE_TO_FILE[scan_type])
-        cmd.extend(["-s", scan_config])
-        print(f"  Running dedicated {scan_type} scan (config: {SCAN_TYPE_TO_FILE[scan_type]})")
-
     for attempt in range(1, max_retries + 1):
-        print(f"  Running (attempt {attempt}/{max_retries}): {' '.join(cmd)}")
+        print(f"  Running config (attempt {attempt}/{max_retries}): {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         output = result.stdout + result.stderr
@@ -142,10 +141,53 @@ def run_scan(input_json, max_retries=3, scan_type=None):
                 sys.exit(1)
         else:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if scan_type:
-                print(f"  {scan_type.capitalize()} scan completed successfully at {timestamp}.")
+            print(f"  Configuration completed successfully at {timestamp}.")
+            return timestamp
+    return None
+
+
+def run_scan_with_callback(input_json, scan_type, on_scan_started, max_retries=3):
+    """
+    Run scanConsole with a scan config. Monitors stdout for "Run Scan" —
+    once detected, waits 5 seconds then calls on_scan_started().
+    After the process finishes, checks for errors and retries if needed.
+
+    Args:
+        on_scan_started: callback function invoked 5s after "Run Scan" appears.
+    """
+    scan_config = os.path.join(SCAN_CONFIGS_DIR, SCAN_TYPE_TO_FILE[scan_type])
+    cmd = [SCAN_CONSOLE, "-r", CONTROLLER_CONFIG, "-c", input_json,
+           "-s", scan_config, "-o", "/dev/null"]
+
+    for attempt in range(1, max_retries + 1):
+        print(f"  Running {scan_type} scan (attempt {attempt}/{max_retries}): {' '.join(cmd)}")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+        callback_called = False
+        output_lines = []
+
+        for line in proc.stdout:
+            output_lines.append(line)
+            if not callback_called and "Run Scan" in line:
+                print(f"  Scan started, waiting 5 seconds before Grafana query...")
+                time.sleep(5)
+                on_scan_started()
+                callback_called = True
+
+        proc.wait()
+        output = "".join(output_lines)
+
+        if "[critical]" in output.lower():
+            print(f"  Attempt {attempt} failed.")
+            if attempt < max_retries:
+                print("  Retrying...")
+                time.sleep(2)
             else:
-                print(f"  Configuration completed successfully at {timestamp}.")
+                print(f"  All {max_retries} attempts failed. Exiting.")
+                sys.exit(1)
+        else:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"  {scan_type.capitalize()} scan completed successfully at {timestamp}.")
             return timestamp
     return None
 
@@ -201,6 +243,14 @@ Examples:
         help="Optional scan type to run instead of simple configuration. "
              "Uses scan configs from /configs/yarr/scans/itkpixv2/",
     )
+    parser.add_argument(
+        "--grafana",
+        default=None,
+        help="Path to module mapping file (e.g. module_map.txt). "
+             "Each line: <slot> <module_serial> (e.g. 'M1 20UPGM23211190'). "
+             "When provided, Grafana is queried after each scan and the "
+             "register value is appended to the output for the matching module.",
+    )
     args = parser.parse_args()
 
     # Parse arguments
@@ -255,6 +305,14 @@ Examples:
     for c in target_chips:
         print(f"  [{c['module']}] {c['chip_name']} (position {c['chip_number']})")
 
+    # Load Grafana module map if provided
+    module_to_slot = None
+    if args.grafana:
+        module_to_slot = load_module_map(args.grafana)
+        print(f"\nGrafana module mapping loaded from {args.grafana}:")
+        for mod, slot in sorted(module_to_slot.items(), key=lambda x: x[1]):
+            print(f"  {slot} -> {mod}")
+
     if args.scan_type:
         print(f"\nScan type: {args.scan_type} (using {SCAN_TYPE_TO_FILE[args.scan_type]})")
         print("Running dedicated scan instead of simple configuration.")
@@ -285,16 +343,35 @@ Examples:
                 for c in other_chips_for_position:
                     set_monitor(c['path'], 63, 63)
 
-                # Run single scan
-                timestamp = run_scan(args.input_json, scan_type=args.scan_type)
+                # Run and query Grafana
+                grafana_values = [None]  # mutable container for callback
 
-                # Wait
-                print("  Waiting 10 seconds...")
-                time.sleep(10)
+                def query_grafana():
+                    if module_to_slot:
+                        result = fetch_register_values()
+                        if result:
+                            print(f"  [Grafana] values: {result}")
+                            grafana_values[0] = result
+
+                if args.scan_type:
+                    # With scan: query Grafana 5s after "Run Scan" appears
+                    timestamp = run_scan_with_callback(
+                        args.input_json, args.scan_type, query_grafana)
+                else:
+                    # Config only: wait 10s after config completes, then query
+                    timestamp = run_config(args.input_json)
+                    print("  Waiting 10 seconds...")
+                    time.sleep(10)
+                    query_grafana()
 
                 # Record entry for each chip at this position
                 for c in chips_at_position:
-                    rows.append((c['module'], c['chip_name'], c['chip_number'], "vmux", vmux, timestamp))
+                    gval = None
+                    if grafana_values[0] and module_to_slot:
+                        slot = module_to_slot.get(c['module'])
+                        if slot:
+                            gval = grafana_values[0].get(slot)
+                    rows.append((c['module'], c['chip_name'], c['chip_number'], "vmux", vmux, timestamp, gval))
 
         # --- imux measurements for this chip position ---
         if imux_values:
@@ -310,29 +387,47 @@ Examples:
                 for c in other_chips_for_position:
                     set_monitor(c['path'], 63, 63)
 
-                # Run single scan
-                timestamp = run_scan(args.input_json, scan_type=args.scan_type)
+                # Run and query Grafana
+                grafana_values = [None]
 
-                # Wait
-                print("  Waiting 10 seconds...")
-                time.sleep(10)
+                def query_grafana():
+                    if module_to_slot:
+                        result = fetch_register_values()
+                        if result:
+                            print(f"  [Grafana] values: {result}")
+                            grafana_values[0] = result
+
+                if args.scan_type:
+                    timestamp = run_scan_with_callback(
+                        args.input_json, args.scan_type, query_grafana)
+                else:
+                    timestamp = run_config(args.input_json)
+                    print("  Waiting 10 seconds...")
+                    time.sleep(10)
+                    query_grafana()
 
                 # Record entry for each chip at this position
                 for c in chips_at_position:
-                    rows.append((c['module'], c['chip_name'], c['chip_number'], "imux", imux, timestamp))
+                    gval = None
+                    if grafana_values[0] and module_to_slot:
+                        slot = module_to_slot.get(c['module'])
+                        if slot:
+                            gval = grafana_values[0].get(slot)
+                    rows.append((c['module'], c['chip_name'], c['chip_number'], "imux", imux, timestamp, gval))
 
     # Sort by module, chip number, reg type, value
     rows.sort(key=lambda x: (x[0], x[2], x[3], x[4]))
 
     # Write output table
-    header = f"{'Module':<20} {'ChipName':<15} {'ChipNum':<8} {'RegType':<8} {'RegValue':<8} {'Timestamp':<20}"
+    header = f"{'Module':<20} {'ChipName':<15} {'ChipNum':<8} {'RegType':<8} {'RegValue':<8} {'Timestamp':<20} {'GrafanaVal':<12}"
     sep = "-" * len(header)
 
     with open(output_file, "w") as f:
         f.write(header + "\n")
         f.write(sep + "\n")
-        for module, name, cn, rtype, rval, ts in rows:
-            f.write(f"{module:<20} {name:<15} {cn:<8} {rtype:<8} {rval:<8} {ts:<20}\n")
+        for module, name, cn, rtype, rval, ts, gval in rows:
+            gval_str = str(gval) if gval is not None else "N/A"
+            f.write(f"{module:<20} {name:<15} {cn:<8} {rtype:<8} {rval:<8} {ts:<20} {gval_str:<12}\n")
 
     print(f"\n{'='*60}")
     print(f"Results written to {output_file}")
