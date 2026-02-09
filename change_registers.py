@@ -36,8 +36,10 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 
@@ -46,6 +48,8 @@ from grafana_query import fetch_register_values, load_module_map
 
 CHIP_NUMBER_TO_ID = {1: 12, 2: 13, 3: 14, 4: 15}
 ID_TO_CHIP_NUMBER = {v: k for k, v in CHIP_NUMBER_TO_ID.items()}
+
+REGISTER_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "register_map.json")
 
 SCAN_CONSOLE = "/YARR/bin/scanConsole"
 CONTROLLER_CONFIG = "/configs/yarr/controller/controller_demi.json"
@@ -59,6 +63,19 @@ SCAN_TYPE_TO_FILE = {
     "random": "randomtrigger_sourcescan.json",
     "selftrigger": "selftrigger_source.json",
 }
+
+
+def load_register_map():
+    """Load the register name mapping from register_map.json."""
+    if os.path.exists(REGISTER_MAP_PATH):
+        with open(REGISTER_MAP_PATH, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def get_register_name(reg_map, reg_type, reg_value):
+    """Look up the human-readable name for a register type and value."""
+    return reg_map.get(reg_type, {}).get(str(reg_value), "unknown")
 
 
 def parse_csv_ints(value):
@@ -124,26 +141,30 @@ def set_monitor(chip_json_path, monitor_v, monitor_i):
 
 def run_config(input_json, max_retries=3):
     """Run scanConsole for configuration only (blocking)."""
-    cmd = [SCAN_CONSOLE, "-r", CONTROLLER_CONFIG, "-c", input_json, "-o", "/dev/null"]
+    tmp_dir = tempfile.mkdtemp(prefix="yarr_scan_")
+    cmd = [SCAN_CONSOLE, "-r", CONTROLLER_CONFIG, "-c", input_json, "-o", tmp_dir]
 
-    for attempt in range(1, max_retries + 1):
-        print(f"  Running config (attempt {attempt}/{max_retries}): {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        for attempt in range(1, max_retries + 1):
+            print(f"  Running config (attempt {attempt}/{max_retries}): {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
 
-        output = result.stdout + result.stderr
-        if "[critical]" in output.lower():
-            print(f"  Attempt {attempt} failed.")
-            if attempt < max_retries:
-                print("  Retrying...")
-                time.sleep(2)
+            output = result.stdout + result.stderr
+            if "[critical]" in output.lower():
+                print(f"  Attempt {attempt} failed.")
+                if attempt < max_retries:
+                    print("  Retrying...")
+                    time.sleep(2)
+                else:
+                    print(f"  All {max_retries} attempts failed. Exiting.")
+                    sys.exit(1)
             else:
-                print(f"  All {max_retries} attempts failed. Exiting.")
-                sys.exit(1)
-        else:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"  Configuration completed successfully at {timestamp}.")
-            return timestamp
-    return None
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"  Configuration completed successfully at {timestamp}.")
+                return timestamp
+        return None
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def run_scan_with_callback(input_json, scan_type, on_scan_started, max_retries=3):
@@ -156,40 +177,44 @@ def run_scan_with_callback(input_json, scan_type, on_scan_started, max_retries=3
         on_scan_started: callback function invoked 5s after "Run Scan" appears.
     """
     scan_config = os.path.join(SCAN_CONFIGS_DIR, SCAN_TYPE_TO_FILE[scan_type])
+    tmp_dir = tempfile.mkdtemp(prefix="yarr_scan_")
     cmd = [SCAN_CONSOLE, "-r", CONTROLLER_CONFIG, "-c", input_json,
-           "-s", scan_config, "-o", "/dev/null"]
+           "-s", scan_config, "-o", tmp_dir]
 
-    for attempt in range(1, max_retries + 1):
-        print(f"  Running {scan_type} scan (attempt {attempt}/{max_retries}): {' '.join(cmd)}")
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        for attempt in range(1, max_retries + 1):
+            print(f"  Running {scan_type} scan (attempt {attempt}/{max_retries}): {' '.join(cmd)}")
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
-        callback_called = False
-        output_lines = []
+            callback_called = False
+            output_lines = []
 
-        for line in proc.stdout:
-            output_lines.append(line)
-            if not callback_called and "Run Scan" in line:
-                print(f"  Scan started, waiting 5 seconds before Grafana query...")
-                time.sleep(5)
-                on_scan_started()
-                callback_called = True
+            for line in proc.stdout:
+                output_lines.append(line)
+                if not callback_called and "Run Scan" in line:
+                    print(f"  Scan started, waiting 5 seconds before Grafana query...")
+                    time.sleep(5)
+                    on_scan_started()
+                    callback_called = True
 
-        proc.wait()
-        output = "".join(output_lines)
+            proc.wait()
+            output = "".join(output_lines)
 
-        if "[critical]" in output.lower():
-            print(f"  Attempt {attempt} failed.")
-            if attempt < max_retries:
-                print("  Retrying...")
-                time.sleep(2)
+            if "[critical]" in output.lower():
+                print(f"  Attempt {attempt} failed.")
+                if attempt < max_retries:
+                    print("  Retrying...")
+                    time.sleep(2)
+                else:
+                    print(f"  All {max_retries} attempts failed. Exiting.")
+                    sys.exit(1)
             else:
-                print(f"  All {max_retries} attempts failed. Exiting.")
-                sys.exit(1)
-        else:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"  {scan_type.capitalize()} scan completed successfully at {timestamp}.")
-            return timestamp
-    return None
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"  {scan_type.capitalize()} scan completed successfully at {timestamp}.")
+                return timestamp
+        return None
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def main():
@@ -317,6 +342,8 @@ Examples:
         print(f"\nScan type: {args.scan_type} (using {SCAN_TYPE_TO_FILE[args.scan_type]})")
         print("Running dedicated scan instead of simple configuration.")
 
+    reg_map = load_register_map()
+
     rows = []
 
     # in the same module simultaneously
@@ -331,8 +358,20 @@ Examples:
 
         # --- vmux measurements for this chip position ---
         if vmux_values:
-            for vmux in vmux_values:
-                print(f"\n=== vmux={vmux} for chip position {chip_num} across all modules ===")
+            # Ensure vmux=30 (ground reference) is measured first
+            ordered_vmux = list(vmux_values)
+            user_requested_vmux_30 = 30 in ordered_vmux
+            if 30 in ordered_vmux:
+                ordered_vmux.remove(30)
+            ordered_vmux.insert(0, 30)
+
+            vmux_ground_ref = {}  # slot -> raw Grafana value at vmux=30
+
+            for vmux in ordered_vmux:
+                if vmux == 30 and not user_requested_vmux_30:
+                    print(f"\n=== [Reference] vmux=30 (ground) for chip position {chip_num} — calibration baseline ===")
+                else:
+                    print(f"\n=== vmux={vmux} for chip position {chip_num} across all modules ===")
 
                 # Set chips at this position: MonitorV=vmux, MonitorI=63
                 for c in chips_at_position:
@@ -364,19 +403,42 @@ Examples:
                     time.sleep(10)
                     query_grafana()
 
-                # Record entry for each chip at this position
+                # Store ground reference at vmux=30
+                if vmux == 30 and grafana_values[0] and module_to_slot:
+                    for slot, val in grafana_values[0].items():
+                        vmux_ground_ref[slot] = val
+
+                # Record entry for each chip at this position (skip auto-added references)
+                if vmux == 30 and not user_requested_vmux_30:
+                    continue
                 for c in chips_at_position:
                     gval = None
+                    cal_val = None
                     if grafana_values[0] and module_to_slot:
                         slot = module_to_slot.get(c['module'])
                         if slot:
                             gval = grafana_values[0].get(slot)
-                    rows.append((c['module'], c['chip_name'], c['chip_number'], "vmux", vmux, timestamp, gval))
+                            if gval is not None and slot in vmux_ground_ref:
+                                cal_val = round(gval - vmux_ground_ref[slot], 3)
+                    reg_name = get_register_name(reg_map, "vmux", vmux)
+                    rows.append((c['module'], c['chip_name'], c['chip_number'], "vmux", vmux, reg_name, timestamp, gval, cal_val))
 
         # --- imux measurements for this chip position ---
         if imux_values:
-            for imux in imux_values:
-                print(f"\n=== imux={imux} for chip position {chip_num} across all modules ===")
+            # Ensure imux=63 (baseline reference) is measured first
+            ordered_imux = list(imux_values)
+            user_requested_imux_63 = 63 in ordered_imux
+            if 63 in ordered_imux:
+                ordered_imux.remove(63)
+            ordered_imux.insert(0, 63)
+
+            imux_baseline_ref = {}  # slot -> raw Grafana value at imux=63
+
+            for imux in ordered_imux:
+                if imux == 63 and not user_requested_imux_63:
+                    print(f"\n=== [Reference] imux=63 (baseline) for chip position {chip_num} — calibration baseline ===")
+                else:
+                    print(f"\n=== imux={imux} for chip position {chip_num} across all modules ===")
 
                 # Set chips at this position: MonitorV=1, MonitorI=imux
                 for c in chips_at_position:
@@ -406,28 +468,42 @@ Examples:
                     time.sleep(10)
                     query_grafana()
 
-                # Record entry for each chip at this position
+                # Store baseline reference at imux=63
+                if imux == 63 and grafana_values[0] and module_to_slot:
+                    for slot, val in grafana_values[0].items():
+                        imux_baseline_ref[slot] = val
+
+                # Record entry for each chip at this position (skip auto-added references)
+                if imux == 63 and not user_requested_imux_63:
+                    continue
                 for c in chips_at_position:
                     gval = None
+                    cal_val = None
                     if grafana_values[0] and module_to_slot:
                         slot = module_to_slot.get(c['module'])
                         if slot:
                             gval = grafana_values[0].get(slot)
-                    rows.append((c['module'], c['chip_name'], c['chip_number'], "imux", imux, timestamp, gval))
+                            if gval is not None and slot in imux_baseline_ref:
+                                cal_val = round((gval - imux_baseline_ref[slot]) / 10, 3)
+                    reg_name = get_register_name(reg_map, "imux", imux)
+                    rows.append((c['module'], c['chip_name'], c['chip_number'], "imux", imux, reg_name, timestamp, gval, cal_val))
 
     # Sort by module, chip number, reg type, value
     rows.sort(key=lambda x: (x[0], x[2], x[3], x[4]))
 
     # Write output table
-    header = f"{'Module':<20} {'ChipName':<15} {'ChipNum':<8} {'RegType':<8} {'RegValue':<8} {'Timestamp':<20} {'GrafanaVal':<12}"
+    header = (f"{'Module':<20} {'ChipName':<15} {'ChipNum':<8} {'RegType':<8} {'RegValue':<9} "
+              f"{'RegName':<35} {'Timestamp':<20} {'GrafanaVal':<12} {'CalibratedVal':<14}")
     sep = "-" * len(header)
 
     with open(output_file, "w") as f:
         f.write(header + "\n")
         f.write(sep + "\n")
-        for module, name, cn, rtype, rval, ts, gval in rows:
+        for module, name, cn, rtype, rval, reg_name, ts, gval, cal_val in rows:
             gval_str = str(gval) if gval is not None else "N/A"
-            f.write(f"{module:<20} {name:<15} {cn:<8} {rtype:<8} {rval:<8} {ts:<20} {gval_str:<12}\n")
+            cal_str = str(cal_val) if cal_val is not None else "N/A"
+            f.write(f"{module:<20} {name:<15} {cn:<8} {rtype:<8} {rval:<9} "
+                    f"{reg_name:<35} {ts:<20} {gval_str:<12} {cal_str:<14}\n")
 
     print(f"\n{'='*60}")
     print(f"Results written to {output_file}")

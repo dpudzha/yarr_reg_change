@@ -3,11 +3,16 @@ Grafana query helper for fetching register monitoring values.
 
 Queries InfluxDB (via Grafana) for M1-M4 REG[V] values from the
 "RegisterRead" bucket.
+
+Uses only the standard library (urllib) so it works in containers
+without third-party packages.
 """
 
+import json as _json
 import os
-import requests
 from datetime import datetime, timedelta
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 GRAFANA_URL = "http://193.206.86.196:3000"
 DATASOURCE_UID = "ffbqtv11qyv40c"
@@ -76,9 +81,10 @@ def fetch_register_values():
 
     try:
         url = f"{GRAFANA_URL}/api/ds/query"
-        resp = requests.post(url, json=payload, headers=_headers(), timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+        body = _json.dumps(payload).encode("utf-8")
+        req = Request(url, data=body, headers=_headers(), method="POST")
+        with urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
 
         result = {s: None for s in SLOTS}
         frames = data.get("results", {}).get("A", {}).get("frames", [])
@@ -91,7 +97,7 @@ def fetch_register_values():
                     result[measurement] = round(float(values[1][-1]), 2)
 
         return result
-    except requests.RequestException as e:
+    except (URLError, OSError) as e:
         print(f"  [Grafana] Query failed: {e}")
         return None
     except (KeyError, IndexError, TypeError, ValueError) as e:

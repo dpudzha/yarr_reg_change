@@ -15,6 +15,7 @@ python3 change_registers.py <input_json> <chip_numbers> [--vmux <values>] [--imu
 | `--vmux` | Comma-separated vmux values (0-63). Optional if `--imux` is specified |
 | `--imux` | Comma-separated imux values (0-63). Optional if `--vmux` is specified |
 | `--scan-type` | Optional scan type: `digital`, `analog`, `noise`, `random`, `selftrigger` |
+| `--grafana` | Path to module mapping file for Grafana readback (e.g., `module_map.txt`) |
 | `output_file` | Optional output filename (default: `registers_info_<timestamp>.txt`) |
 
 At least one of `--vmux` or `--imux` must be specified.
@@ -67,4 +68,7 @@ Results are written to a tab-formatted text file containing:
 - Chip number
 - Register type (vmux/imux)
 - Register value
+- Register name (human-readable description from `register_map.json`)
 - Timestamp
+- Grafana value (when `--grafana` is used, otherwise N/A)
+- Calibrated value (when `--grafana` is used, otherwise N/A)
