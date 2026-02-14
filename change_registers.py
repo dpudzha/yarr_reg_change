@@ -94,6 +94,18 @@ def extract_module_name(config_path):
     return parts[0] if parts else "unknown"
 
 
+def detect_single_module_serial(input_json_path):
+    """For single-module connectivity files, extract the module serial from
+    the parent directory name (e.g. '.../20UPGM23211190/20UPGM23211190_L2_warm.json'
+    → '20UPGM23211190').  Returns None for multi-module files or when the
+    directory name doesn't look like a serial."""
+    parent_dir = os.path.basename(os.path.dirname(input_json_path))
+    # Module serials start with "20UPG"
+    if parent_dir.startswith("20UPG"):
+        return parent_dir
+    return None
+
+
 def load_all_chips(chips_entries, input_dir):
     """
     Load all chip entries and group by module.
@@ -139,10 +151,10 @@ def set_monitor(chip_json_path, monitor_v, monitor_i):
         f.write(text)
 
 
-def run_config(input_json, max_retries=3):
+def run_config(input_json, controller_config=CONTROLLER_CONFIG, max_retries=3):
     """Run scanConsole for configuration only (blocking)."""
     tmp_dir = tempfile.mkdtemp(prefix="yarr_scan_")
-    cmd = [SCAN_CONSOLE, "-r", CONTROLLER_CONFIG, "-c", input_json, "-o", tmp_dir]
+    cmd = [SCAN_CONSOLE, "-r", controller_config, "-c", input_json, "-o", tmp_dir]
 
     try:
         for attempt in range(1, max_retries + 1):
@@ -167,7 +179,8 @@ def run_config(input_json, max_retries=3):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def run_scan_with_callback(input_json, scan_type, on_scan_started, max_retries=3):
+def run_scan_with_callback(input_json, scan_type, on_scan_started,
+                           controller_config=CONTROLLER_CONFIG, max_retries=3):
     """
     Run scanConsole with a scan config. Monitors stdout for "Run Scan" —
     once detected, waits 5 seconds then calls on_scan_started().
@@ -178,7 +191,7 @@ def run_scan_with_callback(input_json, scan_type, on_scan_started, max_retries=3
     """
     scan_config = os.path.join(SCAN_CONFIGS_DIR, SCAN_TYPE_TO_FILE[scan_type])
     tmp_dir = tempfile.mkdtemp(prefix="yarr_scan_")
-    cmd = [SCAN_CONSOLE, "-r", CONTROLLER_CONFIG, "-c", input_json,
+    cmd = [SCAN_CONSOLE, "-r", controller_config, "-c", input_json,
            "-s", scan_config, "-o", tmp_dir]
 
     try:
@@ -269,6 +282,11 @@ Examples:
              "Uses scan configs from /configs/yarr/scans/itkpixv2/",
     )
     parser.add_argument(
+        "--controller",
+        default=CONTROLLER_CONFIG,
+        help="Path to controller config JSON (default: %(default)s)",
+    )
+    parser.add_argument(
         "--grafana",
         default=None,
         help="Path to module mapping file (e.g. module_map.txt). "
@@ -315,6 +333,14 @@ Examples:
     # Load connectivity and all chips
     connectivity = load_json(input_json_path)
     all_chips = load_all_chips(connectivity["chips"], input_dir)
+
+    # For single-module files, the chip config paths use a subfolder name
+    # (e.g. "L2_warm") as the module name, but Grafana module maps use the
+    # serial number (e.g. "20UPGM23211190").  Detect and remap.
+    single_serial = detect_single_module_serial(input_json_path)
+    if single_serial:
+        for c in all_chips:
+            c['module'] = single_serial
 
     # Find unique modules
     modules = sorted(set(c['module'] for c in all_chips))
@@ -395,10 +421,11 @@ Examples:
                 if args.scan_type:
                     # With scan: query Grafana 5s after "Run Scan" appears
                     timestamp = run_scan_with_callback(
-                        args.input_json, args.scan_type, query_grafana)
+                        args.input_json, args.scan_type, query_grafana,
+                        controller_config=args.controller)
                 else:
                     # Config only: wait 10s after config completes, then query
-                    timestamp = run_config(args.input_json)
+                    timestamp = run_config(args.input_json, controller_config=args.controller)
                     print("  Waiting 10 seconds...")
                     time.sleep(10)
                     query_grafana()
@@ -461,9 +488,10 @@ Examples:
 
                 if args.scan_type:
                     timestamp = run_scan_with_callback(
-                        args.input_json, args.scan_type, query_grafana)
+                        args.input_json, args.scan_type, query_grafana,
+                        controller_config=args.controller)
                 else:
-                    timestamp = run_config(args.input_json)
+                    timestamp = run_config(args.input_json, controller_config=args.controller)
                     print("  Waiting 10 seconds...")
                     time.sleep(10)
                     query_grafana()

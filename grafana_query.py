@@ -94,7 +94,7 @@ def fetch_register_values():
             if measurement in result:
                 values = frame.get("data", {}).get("values", [])
                 if len(values) >= 2 and values[1]:
-                    result[measurement] = round(float(values[1][-1]), 2)
+                    result[measurement] = round(float(values[1][-1]), 3)
 
         return result
     except (URLError, OSError) as e:
