@@ -20,3 +20,6 @@ registers_info_*.txt
 .idea/
 .vscode/
 *.swp
+
+# Claude Code
+CLAUDE.md

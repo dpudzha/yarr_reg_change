@@ -171,7 +171,7 @@ def run_config(input_json, controller_config=CONTROLLER_CONFIG, max_retries=3):
                     print(f"  All {max_retries} attempts failed. Exiting.")
                     sys.exit(1)
             else:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
                 print(f"  Configuration completed successfully at {timestamp}.")
                 return timestamp
         return None
@@ -222,7 +222,7 @@ def run_scan_with_callback(input_json, scan_type, on_scan_started,
                     print(f"  All {max_retries} attempts failed. Exiting.")
                     sys.exit(1)
             else:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
                 print(f"  {scan_type.capitalize()} scan completed successfully at {timestamp}.")
                 return timestamp
         return None
@@ -446,7 +446,7 @@ Examples:
                         if slot:
                             gval = grafana_values[0].get(slot)
                             if gval is not None and slot in vmux_ground_ref:
-                                cal_val = round(gval - vmux_ground_ref[slot], 3)
+                                cal_val = round(gval - vmux_ground_ref[slot], 6)
                     reg_name = get_register_name(reg_map, "vmux", vmux)
                     rows.append((c['module'], c['chip_name'], c['chip_number'], "vmux", vmux, reg_name, timestamp, gval, cal_val))
 
@@ -512,7 +512,7 @@ Examples:
                         if slot:
                             gval = grafana_values[0].get(slot)
                             if gval is not None and slot in imux_baseline_ref:
-                                cal_val = round((gval - imux_baseline_ref[slot]) / 10, 3)
+                                cal_val = round((gval - imux_baseline_ref[slot]) / 10, 6)
                     reg_name = get_register_name(reg_map, "imux", imux)
                     rows.append((c['module'], c['chip_name'], c['chip_number'], "imux", imux, reg_name, timestamp, gval, cal_val))
 

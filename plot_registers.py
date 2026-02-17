@@ -54,13 +54,22 @@ def parse_output_file(filepath):
             chip_num = int(parts[2])
             reg_type = parts[3]
             reg_value = int(parts[4])
-            # RegName can contain spaces, so we need to parse from the right
+            # RegName can contain spaces, so parse from the right.
             # Last 3 fields: Timestamp, GrafanaVal, CalibratedVal
+            # Timestamp matches ISO format; scan from right to find it.
             cal_str = parts[-1]
             gval_str = parts[-2]
-            timestamp = parts[-3]
+            # Find timestamp (ISO-like pattern) scanning from the right
+            ts_idx = None
+            for i in range(len(parts) - 3, 4, -1):
+                if re.match(r'\d{4}-\d{2}-\d{2}', parts[i]):
+                    ts_idx = i
+                    break
+            if ts_idx is None:
+                ts_idx = len(parts) - 3
+            timestamp = parts[ts_idx]
             # RegName is everything between reg_value and timestamp
-            reg_name = " ".join(parts[5:-3])
+            reg_name = " ".join(parts[5:ts_idx])
 
             cal_val = None
             if cal_str != "N/A":
@@ -80,6 +89,18 @@ def parse_output_file(filepath):
             continue
 
     return rows
+
+
+def parse_register_name(raw_name):
+    """Parse register name, extracting optional multiplier from '/NNNNN' suffix.
+
+    Returns (clean_name, multiplier) where multiplier is None if not present.
+    E.g. 'Dig. input current/21000' -> ('Dig. input current', 21000)
+    """
+    match = re.match(r'^(.+?)/(\d+)$', raw_name)
+    if match:
+        return match.group(1).strip(), int(match.group(2))
+    return raw_name, None
 
 
 def main():
@@ -152,9 +173,23 @@ def main():
         sys.exit(1)
 
     # Group by (module, chip_num) to produce one plot each
+    # Also collect register names for labeling
     chips = set()
-    for (module, chip_num, _, _) in data:
+    reg_names = {}  # (module, chip_num, reg_type, reg_value) -> reg_name
+    for (module, chip_num, reg_type, reg_value) in data:
         chips.add((module, chip_num))
+
+    # Extract register names from the original parsed data
+    for filepath in args.files:
+        current_uA = extract_current_from_filename(filepath)
+        if current_uA is None:
+            continue
+        rows = parse_output_file(filepath)
+        for row in rows:
+            if row['reg_type'] == args.reg_type and row['reg_value'] in reg_values:
+                key = (row['module'], row['chip_num'], row['reg_type'], row['reg_value'])
+                if key not in reg_names and row['reg_name']:
+                    reg_names[key] = row['reg_name']
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -173,11 +208,23 @@ def main():
         fig, axes = plt.subplots(1, 3, figsize=(16, 5))
         fig.suptitle(f"{module} — Chip {chip_num}", fontsize=14)
 
+        # Get register names and parse multipliers
+        raw_name_lo = reg_names.get(key_lo, f"{args.reg_type}={reg_lo}")
+        raw_name_hi = reg_names.get(key_hi, f"{args.reg_type}={reg_hi}")
+        name_lo, mult_lo = parse_register_name(raw_name_lo)
+        name_hi, mult_hi = parse_register_name(raw_name_hi)
+
+        # Apply multipliers to calibrated values if present
+        if mult_lo:
+            vals_lo = [(c, v * mult_lo) for c, v in vals_lo]
+        if mult_hi:
+            vals_hi = [(c, v * mult_hi) for c, v in vals_hi]
+
         # Plot reg_lo
         if vals_lo:
             currents, cals = zip(*vals_lo)
             axes[0].plot(currents, cals, 'o-', color='tab:blue')
-        axes[0].set_title(f"{args.reg_type}={reg_lo}")
+        axes[0].set_title(f"{name_lo}\n({args.reg_type}={reg_lo})")
         axes[0].set_xlabel("X-ray tube current (uA)")
         axes[0].set_ylabel(f"CalibratedVal ({y_unit})")
         axes[0].grid(True, alpha=0.3)
@@ -186,19 +233,19 @@ def main():
         if vals_hi:
             currents, cals = zip(*vals_hi)
             axes[1].plot(currents, cals, 'o-', color='tab:orange')
-        axes[1].set_title(f"{args.reg_type}={reg_hi}")
+        axes[1].set_title(f"{name_hi}\n({args.reg_type}={reg_hi})")
         axes[1].set_xlabel("X-ray tube current (uA)")
         axes[1].set_ylabel(f"CalibratedVal ({y_unit})")
         axes[1].grid(True, alpha=0.3)
 
-        # Difference plot (reg_hi - reg_lo)
+        # Difference plot (reg_lo - reg_hi)
         lo_dict = dict(vals_lo)
         hi_dict = dict(vals_hi)
         common_currents = sorted(set(lo_dict) & set(hi_dict))
         if common_currents:
-            diffs = [hi_dict[c] - lo_dict[c] for c in common_currents]
+            diffs = [lo_dict[c] - hi_dict[c] for c in common_currents]
             axes[2].plot(common_currents, diffs, 's-', color='tab:green')
-        axes[2].set_title(f"{args.reg_type}={reg_hi} − {args.reg_type}={reg_lo}")
+        axes[2].set_title(f"{name_lo} − {name_hi}\n({args.reg_type}={reg_lo} − {args.reg_type}={reg_hi})")
         axes[2].set_xlabel("X-ray tube current (uA)")
         axes[2].set_ylabel(f"Difference ({y_unit})")
         axes[2].grid(True, alpha=0.3)
