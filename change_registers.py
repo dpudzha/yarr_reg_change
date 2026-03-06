@@ -276,6 +276,32 @@ def run_scan_with_callback(input_json, scan_type, on_scan_started,
             shutil.rmtree(scan_dir, ignore_errors=True)
 
 
+def run_preset(preset_json_path, controller_config=CONTROLLER_CONFIG):
+    """Pre-configure all chips in a connectivity file to baseline state.
+
+    Sets all chips to MonitorV=63, MonitorI=63 (disabled).
+    Runs scanConsole once (config only, no skip-reset) with the preset file.
+    """
+    preset_dir = os.path.dirname(os.path.abspath(preset_json_path))
+    preset_data = load_json(preset_json_path)
+    preset_chips = preset_data["chips"]
+
+    mon_v, mon_i = 63, 63
+
+    print(f"\n{'='*60}")
+    print(f"Preset: configuring all chips in {preset_json_path}")
+    print(f"  Setting MonitorV={mon_v}, MonitorI={mon_i} (baseline)")
+
+    for entry in preset_chips:
+        chip_path = os.path.abspath(os.path.join(preset_dir, entry["config"]))
+        set_monitor(chip_path, mon_v, mon_i)
+
+    print(f"  Running scanConsole with preset file...")
+    run_config(preset_json_path, controller_config=controller_config)
+    print(f"Preset complete.")
+    print(f"{'='*60}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Measure vmux and/or imux register values for ITkPixV2 chips.",
@@ -341,9 +367,12 @@ Examples:
              "register value is appended to the output for the matching module.",
     )
     parser.add_argument(
-        "--skip-reset",
-        action="store_true",
-        help="Pass --skip-reset to scanConsole.",
+        "--preset",
+        default=None,
+        help="Path to a connectivity JSON file used to pre-configure all chips "
+             "to MonitorV=63, MonitorI=63 before measurements start. Runs "
+             "scanConsole once with this file, then proceeds with actual "
+             "measurements using --skip-reset.",
     )
     parser.add_argument(
         "-o", "--output-dir",
@@ -358,6 +387,9 @@ Examples:
     chip_numbers = parse_csv_ints(args.chip_numbers)
     vmux_values = parse_csv_ints(args.vmux) if args.vmux else None
     imux_values = parse_csv_ints(args.imux) if args.imux else None
+
+    # When --preset is used, enable --skip-reset for actual measurements
+    args.skip_reset = bool(args.preset)
 
     # Validate that at least one of vmux or imux is specified
     if vmux_values is None and imux_values is None:
@@ -449,6 +481,8 @@ Examples:
 
         # --- vmux measurements for this chip position ---
         if vmux_values:
+            if args.preset:
+                run_preset(args.preset, controller_config=args.controller)
             # Ensure vmux=30 (ground reference) is measured first
             ordered_vmux = list(vmux_values)
             user_requested_vmux_30 = 30 in ordered_vmux
@@ -522,6 +556,8 @@ Examples:
 
         # --- imux measurements for this chip position ---
         if imux_values:
+            if args.preset:
+                run_preset(args.preset, controller_config=args.controller)
             # Ensure imux=63 (baseline reference) is measured first
             ordered_imux = list(imux_values)
             user_requested_imux_63 = 63 in ordered_imux
