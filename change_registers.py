@@ -151,10 +151,40 @@ def set_monitor(chip_json_path, monitor_v, monitor_i):
         f.write(text)
 
 
-def run_config(input_json, controller_config=CONTROLLER_CONFIG, max_retries=3):
-    """Run scanConsole for configuration only (blocking)."""
-    tmp_dir = tempfile.mkdtemp(prefix="yarr_scan_")
-    cmd = [SCAN_CONSOLE, "-r", controller_config, "-c", input_json, "-o", tmp_dir]
+def find_new_run_dir(output_dir, dirs_before):
+    """Find the newly created directory in output_dir and extract its run number.
+
+    Returns the run number string (e.g. '002736') or None.
+    """
+    try:
+        dirs_after = set(os.listdir(output_dir))
+    except OSError:
+        return None
+    new_dirs = dirs_after - dirs_before
+    if not new_dirs:
+        return None
+    # Pick the newest directory
+    newest = sorted(new_dirs)[-1]
+    # Extract leading digits from folder name (e.g. '002736_randomtrigger_sourcescan')
+    match = re.match(r'^(\d+)', newest)
+    if match:
+        return match.group(1)
+    return None
+
+
+def run_config(input_json, controller_config=CONTROLLER_CONFIG, max_retries=3,
+               output_dir=None, skip_reset=False):
+    """Run scanConsole for configuration only (blocking).
+
+    Returns (timestamp, run_number) tuple.
+    """
+    use_temp = output_dir is None
+    scan_dir = tempfile.mkdtemp(prefix="yarr_scan_") if use_temp else output_dir
+    cmd = [SCAN_CONSOLE, "-r", controller_config, "-c", input_json, "-o", scan_dir]
+    if skip_reset:
+        cmd.append("--skip-reset")
+
+    dirs_before = set(os.listdir(scan_dir)) if not use_temp else set()
 
     try:
         for attempt in range(1, max_retries + 1):
@@ -172,15 +202,20 @@ def run_config(input_json, controller_config=CONTROLLER_CONFIG, max_retries=3):
                     sys.exit(1)
             else:
                 timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                run_number = find_new_run_dir(scan_dir, dirs_before) if not use_temp else None
                 print(f"  Configuration completed successfully at {timestamp}.")
-                return timestamp
-        return None
+                if run_number:
+                    print(f"  Run number: {run_number}")
+                return timestamp, run_number
+        return None, None
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if use_temp:
+            shutil.rmtree(scan_dir, ignore_errors=True)
 
 
 def run_scan_with_callback(input_json, scan_type, on_scan_started,
-                           controller_config=CONTROLLER_CONFIG, max_retries=3):
+                           controller_config=CONTROLLER_CONFIG, max_retries=3,
+                           output_dir=None, skip_reset=False):
     """
     Run scanConsole with a scan config. Monitors stdout for "Run Scan" —
     once detected, waits 5 seconds then calls on_scan_started().
@@ -188,11 +223,18 @@ def run_scan_with_callback(input_json, scan_type, on_scan_started,
 
     Args:
         on_scan_started: callback function invoked 5s after "Run Scan" appears.
+
+    Returns (timestamp, run_number) tuple.
     """
     scan_config = os.path.join(SCAN_CONFIGS_DIR, SCAN_TYPE_TO_FILE[scan_type])
-    tmp_dir = tempfile.mkdtemp(prefix="yarr_scan_")
+    use_temp = output_dir is None
+    scan_dir = tempfile.mkdtemp(prefix="yarr_scan_") if use_temp else output_dir
     cmd = [SCAN_CONSOLE, "-r", controller_config, "-c", input_json,
-           "-s", scan_config, "-o", tmp_dir]
+           "-s", scan_config, "-o", scan_dir]
+    if skip_reset:
+        cmd.append("--skip-reset")
+
+    dirs_before = set(os.listdir(scan_dir)) if not use_temp else set()
 
     try:
         for attempt in range(1, max_retries + 1):
@@ -223,11 +265,15 @@ def run_scan_with_callback(input_json, scan_type, on_scan_started,
                     sys.exit(1)
             else:
                 timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                run_number = find_new_run_dir(scan_dir, dirs_before) if not use_temp else None
                 print(f"  {scan_type.capitalize()} scan completed successfully at {timestamp}.")
-                return timestamp
-        return None
+                if run_number:
+                    print(f"  Run number: {run_number}")
+                return timestamp, run_number
+        return None, None
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if use_temp:
+            shutil.rmtree(scan_dir, ignore_errors=True)
 
 
 def main():
@@ -294,6 +340,18 @@ Examples:
              "When provided, Grafana is queried after each scan and the "
              "register value is appended to the output for the matching module.",
     )
+    parser.add_argument(
+        "--skip-reset",
+        action="store_true",
+        help="Pass --skip-reset to scanConsole.",
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        default=None,
+        help="Directory to store scanConsole results and the output file. "
+             "If not specified, scanConsole results go to a temp directory "
+             "that is deleted after each run.",
+    )
     args = parser.parse_args()
 
     # Parse arguments
@@ -320,11 +378,18 @@ Examples:
             if not 0 <= i <= 63:
                 sys.exit(f"Error: imux value {i} out of range (0-63).")
 
+    # Create output directory if specified
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+
     # Output file
     if args.output:
         output_file = args.output
     else:
         output_file = f"registers_info_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    # Place output file in output_dir if specified
+    if args.output_dir and not os.path.isabs(output_file):
+        output_file = os.path.join(args.output_dir, output_file)
 
     # Resolve paths
     input_json_path = os.path.abspath(args.input_json)
@@ -420,12 +485,17 @@ Examples:
 
                 if args.scan_type:
                     # With scan: query Grafana 5s after "Run Scan" appears
-                    timestamp = run_scan_with_callback(
+                    timestamp, run_number = run_scan_with_callback(
                         args.input_json, args.scan_type, query_grafana,
-                        controller_config=args.controller)
+                        controller_config=args.controller,
+                        output_dir=args.output_dir,
+                        skip_reset=args.skip_reset)
                 else:
                     # Config only: wait 10s after config completes, then query
-                    timestamp = run_config(args.input_json, controller_config=args.controller)
+                    timestamp, run_number = run_config(
+                        args.input_json, controller_config=args.controller,
+                        output_dir=args.output_dir,
+                        skip_reset=args.skip_reset)
                     print("  Waiting 10 seconds...")
                     time.sleep(10)
                     query_grafana()
@@ -448,7 +518,7 @@ Examples:
                             if gval is not None and slot in vmux_ground_ref:
                                 cal_val = round(gval - vmux_ground_ref[slot], 6)
                     reg_name = get_register_name(reg_map, "vmux", vmux)
-                    rows.append((c['module'], c['chip_name'], c['chip_number'], "vmux", vmux, reg_name, timestamp, gval, cal_val))
+                    rows.append((c['module'], c['chip_name'], c['chip_number'], "vmux", vmux, reg_name, timestamp, gval, cal_val, run_number))
 
         # --- imux measurements for this chip position ---
         if imux_values:
@@ -487,11 +557,16 @@ Examples:
                             grafana_values[0] = result
 
                 if args.scan_type:
-                    timestamp = run_scan_with_callback(
+                    timestamp, run_number = run_scan_with_callback(
                         args.input_json, args.scan_type, query_grafana,
-                        controller_config=args.controller)
+                        controller_config=args.controller,
+                        output_dir=args.output_dir,
+                        skip_reset=args.skip_reset)
                 else:
-                    timestamp = run_config(args.input_json, controller_config=args.controller)
+                    timestamp, run_number = run_config(
+                        args.input_json, controller_config=args.controller,
+                        output_dir=args.output_dir,
+                        skip_reset=args.skip_reset)
                     print("  Waiting 10 seconds...")
                     time.sleep(10)
                     query_grafana()
@@ -514,24 +589,25 @@ Examples:
                             if gval is not None and slot in imux_baseline_ref:
                                 cal_val = round((gval - imux_baseline_ref[slot]) / 10, 6)
                     reg_name = get_register_name(reg_map, "imux", imux)
-                    rows.append((c['module'], c['chip_name'], c['chip_number'], "imux", imux, reg_name, timestamp, gval, cal_val))
+                    rows.append((c['module'], c['chip_name'], c['chip_number'], "imux", imux, reg_name, timestamp, gval, cal_val, run_number))
 
     # Sort by module, chip number, reg type, value
     rows.sort(key=lambda x: (x[0], x[2], x[3], x[4]))
 
     # Write output table
     header = (f"{'Module':<20} {'ChipName':<15} {'ChipNum':<8} {'RegType':<8} {'RegValue':<9} "
-              f"{'RegName':<35} {'Timestamp':<20} {'GrafanaVal':<12} {'CalibratedVal':<14}")
+              f"{'RegName':<35} {'Timestamp':<20} {'GrafanaVal':<12} {'CalibratedVal':<14} {'RunNumber':<10}")
     sep = "-" * len(header)
 
     with open(output_file, "w") as f:
         f.write(header + "\n")
         f.write(sep + "\n")
-        for module, name, cn, rtype, rval, reg_name, ts, gval, cal_val in rows:
+        for module, name, cn, rtype, rval, reg_name, ts, gval, cal_val, run_num in rows:
             gval_str = str(gval) if gval is not None else "N/A"
             cal_str = str(cal_val) if cal_val is not None else "N/A"
+            run_str = str(run_num) if run_num is not None else "N/A"
             f.write(f"{module:<20} {name:<15} {cn:<8} {rtype:<8} {rval:<9} "
-                    f"{reg_name:<35} {ts:<20} {gval_str:<12} {cal_str:<14}\n")
+                    f"{reg_name:<35} {ts:<20} {gval_str:<12} {cal_str:<14} {run_str:<10}\n")
 
     print(f"\n{'='*60}")
     print(f"Results written to {output_file}")
