@@ -174,7 +174,7 @@ def find_new_run_dir(output_dir, dirs_before):
 
 
 def run_config(input_json, controller_config=CONTROLLER_CONFIG, max_retries=3,
-               output_dir=None, skip_reset=False):
+               output_dir=None, skip_reset=False, plots=False):
     """Run scanConsole for configuration only (blocking).
 
     Returns (timestamp, run_number) tuple.
@@ -184,6 +184,8 @@ def run_config(input_json, controller_config=CONTROLLER_CONFIG, max_retries=3,
     cmd = [SCAN_CONSOLE, "-r", controller_config, "-c", input_json, "-o", scan_dir]
     if skip_reset:
         cmd.append("--skip-reset")
+    if plots:
+        cmd.append("-p")
 
     dirs_before = set(os.listdir(scan_dir)) if not use_temp else set()
 
@@ -216,7 +218,7 @@ def run_config(input_json, controller_config=CONTROLLER_CONFIG, max_retries=3,
 
 def run_scan_with_callback(input_json, scan_type, on_scan_started,
                            controller_config=CONTROLLER_CONFIG, max_retries=3,
-                           output_dir=None, skip_reset=False):
+                           output_dir=None, skip_reset=False, plots=False):
     """
     Run scanConsole with a scan config. Monitors stdout for "Run Scan" —
     once detected, waits 5 seconds then calls on_scan_started().
@@ -234,6 +236,8 @@ def run_scan_with_callback(input_json, scan_type, on_scan_started,
            "-s", scan_config, "-o", scan_dir]
     if skip_reset:
         cmd.append("--skip-reset")
+    if plots:
+        cmd.append("-p")
 
     dirs_before = set(os.listdir(scan_dir)) if not use_temp else set()
 
@@ -374,6 +378,12 @@ Examples:
              "to MonitorV=63, MonitorI=63 before measurements start. Runs "
              "scanConsole once with this file, then proceeds with actual "
              "measurements using --skip-reset.",
+    )
+    parser.add_argument(
+        "--plots",
+        action="store_true",
+        default=False,
+        help="Enable plot generation in scanConsole (passes -p flag).",
     )
     parser.add_argument(
         "-o", "--output-dir",
@@ -524,13 +534,15 @@ Examples:
                         args.input_json, args.scan_type, query_grafana,
                         controller_config=args.controller,
                         output_dir=args.output_dir,
-                        skip_reset=args.skip_reset)
+                        skip_reset=args.skip_reset,
+                        plots=args.plots)
                 else:
                     # Config only: wait 10s after config completes, then query
                     timestamp, run_number = run_config(
                         args.input_json, controller_config=args.controller,
                         output_dir=args.output_dir,
-                        skip_reset=args.skip_reset)
+                        skip_reset=args.skip_reset,
+                        plots=args.plots)
                     print("  Waiting 10 seconds...")
                     time.sleep(10)
                     query_grafana()
@@ -596,12 +608,14 @@ Examples:
                         args.input_json, args.scan_type, query_grafana,
                         controller_config=args.controller,
                         output_dir=args.output_dir,
-                        skip_reset=args.skip_reset)
+                        skip_reset=args.skip_reset,
+                        plots=args.plots)
                 else:
                     timestamp, run_number = run_config(
                         args.input_json, controller_config=args.controller,
                         output_dir=args.output_dir,
-                        skip_reset=args.skip_reset)
+                        skip_reset=args.skip_reset,
+                        plots=args.plots)
                     print("  Waiting 10 seconds...")
                     time.sleep(10)
                     query_grafana()
