@@ -62,6 +62,7 @@ SCAN_TYPE_TO_FILE = {
     "noise": "std_noisescan.json",
     "random": "randomtrigger_sourcescan.json",
     "selftrigger": "selftrigger_source.json",
+    "exttrigger": "std_exttrigger.json",
 }
 
 
@@ -322,7 +323,7 @@ Examples:
   With dedicated scan type (digital scan instead of simple config):
     python3 change_registers.py module.json 1,2 --vmux 0,5 --scan-type digital
 
-  Available scan types: digital, analog, noise, random, selftrigger
+  Available scan types: digital, analog, noise, random, selftrigger, exttrigger
         """
     )
     parser.add_argument("input_json", help="Path to connectivity JSON (single or multi-module)")
@@ -348,7 +349,7 @@ Examples:
     )
     parser.add_argument(
         "--scan-type",
-        choices=["digital", "analog", "noise", "random", "selftrigger"],
+        choices=["digital", "analog", "noise", "random", "selftrigger", "exttrigger"],
         default=None,
         help="Optional scan type to run instead of simple configuration. "
              "Uses scan configs from /configs/yarr/scans/itkpixv2/",
@@ -539,9 +540,7 @@ Examples:
                     for slot, val in grafana_values[0].items():
                         vmux_ground_ref[slot] = val
 
-                # Record entry for each chip at this position (skip auto-added references)
-                if vmux == 30 and not user_requested_vmux_30:
-                    continue
+                # Record entry for each chip at this position
                 for c in chips_at_position:
                     gval = None
                     cal_val = None
@@ -612,9 +611,7 @@ Examples:
                     for slot, val in grafana_values[0].items():
                         imux_baseline_ref[slot] = val
 
-                # Record entry for each chip at this position (skip auto-added references)
-                if imux == 63 and not user_requested_imux_63:
-                    continue
+                # Record entry for each chip at this position
                 for c in chips_at_position:
                     gval = None
                     cal_val = None
